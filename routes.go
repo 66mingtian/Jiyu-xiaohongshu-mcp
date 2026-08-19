@@ -13,6 +13,7 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
+	_ = router.SetTrustedProxies(nil)
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 
@@ -22,6 +23,9 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 
 	// 健康检查
 	router.GET("/health", healthHandler)
+	if appServer.oauth != nil {
+		appServer.oauth.registerRoutes(router)
+	}
 
 	// MCP 端点 - 使用官方 SDK 的 Streamable HTTP Handler
 	mcpHandler := mcp.NewStreamableHTTPHandler(
@@ -37,35 +41,14 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		},
 	)
 	protected := router.Group("")
-	protected.Use(authMiddleware(appServer.authToken))
+	resourceMetadataURL := ""
+	if appServer.oauth != nil {
+		resourceMetadataURL = appServer.oauth.resourceMetadata
+	}
+	protected.Use(authMiddleware(appServer.authToken, resourceMetadataURL))
 
 	protected.Any("/mcp", gin.WrapH(mcpHandler))
 	protected.Any("/mcp/*path", gin.WrapH(mcpHandler))
-
-	// API 路由组
-	api := protected.Group("/api/v1")
-	{
-		api.GET("/login/status", appServer.checkLoginStatusHandler)
-		api.GET("/login/qrcode", appServer.getLoginQrcodeHandler)
-		api.DELETE("/login/cookies", appServer.deleteCookiesHandler)
-		api.POST("/publish", appServer.publishHandler)
-		api.POST("/publish_video", appServer.publishVideoHandler)
-		api.GET("/feeds/list", appServer.listFeedsHandler)
-		api.GET("/feeds/search", appServer.searchFeedsHandler)
-		api.POST("/feeds/search", appServer.searchFeedsHandler)
-		api.POST("/feeds/detail", appServer.getFeedDetailHandler)
-		api.POST("/user/profile", appServer.userProfileHandler)
-		api.POST("/feeds/comment", appServer.postCommentHandler)
-		api.POST("/feeds/comment/reply", appServer.replyCommentHandler)
-		api.POST("/feeds/like", appServer.likeFeedHandler)
-		api.POST("/feeds/favorite", appServer.favoriteFeedHandler)
-		api.GET("/user/me", appServer.myProfileHandler)
-		api.GET("/notifications/unread", appServer.getUnreadCountHandler)
-		api.GET("/notifications/list", appServer.listNotificationsHandler)
-		api.POST("/notifications/list", appServer.listNotificationsHandler)
-		api.POST("/notifications/reply", appServer.replyNotificationHandler)
-		api.POST("/notifications/like", appServer.likeNotificationHandler)
-	}
 
 	return router
 }

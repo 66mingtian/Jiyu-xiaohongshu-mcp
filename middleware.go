@@ -10,8 +10,13 @@ import (
 )
 
 // authMiddleware 静态 Bearer Token 鉴权中间件，Token 为空时关闭鉴权。
-func authMiddleware(token string) gin.HandlerFunc {
+// OAuth 部署会同时返回 RFC 9728 resource metadata，供 ChatGPT 自动发现授权流程。
+func authMiddleware(token string, resourceMetadataURLs ...string) gin.HandlerFunc {
 	expectedToken := []byte(token)
+	resourceMetadataURL := ""
+	if len(resourceMetadataURLs) > 0 {
+		resourceMetadataURL = resourceMetadataURLs[0]
+	}
 
 	return func(c *gin.Context) {
 		if token == "" {
@@ -23,7 +28,11 @@ func authMiddleware(token string) gin.HandlerFunc {
 		credentials = strings.TrimLeft(credentials, " ")
 		if !found || !strings.EqualFold(scheme, "Bearer") ||
 			subtle.ConstantTimeCompare([]byte(credentials), expectedToken) != 1 {
-			c.Header("WWW-Authenticate", "Bearer")
+			challenge := "Bearer"
+			if resourceMetadataURL != "" {
+				challenge += " resource_metadata=" + resourceMetadataURL
+			}
+			c.Header("WWW-Authenticate", challenge)
 			respondError(c, http.StatusUnauthorized, "UNAUTHORIZED", "未授权", nil)
 			c.Abort()
 			return
@@ -37,7 +46,7 @@ func authMiddleware(token string) gin.HandlerFunc {
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if c.Request.Method == "OPTIONS" {

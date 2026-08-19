@@ -20,13 +20,26 @@ type AppServer struct {
 	router             *gin.Engine
 	httpServer         *http.Server
 	authToken          string
+	oauth              *singleUserOAuth
 }
 
 // NewAppServer 创建新的应用服务器实例
-func NewAppServer(xiaohongshuService *XiaohongshuService, authToken string) *AppServer {
+func NewAppServer(xiaohongshuService *XiaohongshuService, authToken string, publicOrigins ...string) *AppServer {
+	publicOrigin := "http://localhost:18060"
+	if len(publicOrigins) > 0 && publicOrigins[0] != "" {
+		publicOrigin = publicOrigins[0]
+	}
+
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
 		authToken:          authToken,
+	}
+	if authToken != "" {
+		oauth, err := newSingleUserOAuth(authToken, publicOrigin)
+		if err != nil {
+			panic(err)
+		}
+		appServer.oauth = oauth
 	}
 
 	// 初始化 MCP Server（需要在创建 appServer 之后，因为工具注册需要访问 appServer）
