@@ -110,6 +110,7 @@ COPY --from=builder /out/app .
 
 ENV HOME=/app/data/home
 ENV XDG_CONFIG_HOME=/app/data/config
+ENV COOKIES_PATH=/app/data/cookies.json
 
 EXPOSE 18060
 

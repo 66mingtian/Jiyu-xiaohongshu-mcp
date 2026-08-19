@@ -2,7 +2,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
@@ -19,13 +22,24 @@ func main() {
 		port     string
 		token    string
 	)
+	defaultPort := ":18060"
+	if railwayPort := os.Getenv("PORT"); railwayPort != "" {
+		defaultPort = ":" + strings.TrimPrefix(railwayPort, ":")
+	}
 	flag.BoolVar(&headless, "headless", true, "是否无头模式")
-	flag.StringVar(&port, "port", ":18060", "端口")
-	flag.StringVar(&token, "token", "", "鉴权 Token，留空则读取 AUTH_TOKEN")
+	flag.StringVar(&port, "port", defaultPort, "端口")
+	flag.StringVar(&token, "token", "", "鉴权 Token，留空则读取 MCP_TOKEN（兼容 AUTH_TOKEN）")
 	flag.Parse()
+	if token == "" {
+		token = os.Getenv("MCP_TOKEN")
+	}
 	if token == "" {
 		token = os.Getenv("AUTH_TOKEN")
 	}
+	if len(token) < 32 {
+		logrus.Fatal("MCP_TOKEN must be a random secret of at least 32 characters")
+	}
+	publicOrigin := resolvePublicOrigin(port)
 
 	logrus.Infof("xiaohongshu-mcp version: %s", version)
 
@@ -47,8 +61,22 @@ func main() {
 	xiaohongshuService := NewXiaohongshuService()
 
 	// 创建并启动应用服务器
-	appServer := NewAppServer(xiaohongshuService, token)
+	appServer := NewAppServer(xiaohongshuService, token, publicOrigin)
 	if err := appServer.Start(port); err != nil {
 		logrus.Fatalf("failed to run server: %v", err)
 	}
+}
+
+func resolvePublicOrigin(listenAddress string) string {
+	if configured := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/"); configured != "" {
+		return configured
+	}
+	if domain := strings.TrimSpace(os.Getenv("RAILWAY_PUBLIC_DOMAIN")); domain != "" {
+		return "https://" + strings.TrimRight(domain, "/")
+	}
+	port := strings.TrimPrefix(listenAddress, ":")
+	if parsed, err := strconv.Atoi(port); err != nil || parsed < 1 || parsed > 65535 {
+		panic(fmt.Sprintf("invalid listen port %q", listenAddress))
+	}
+	return "http://localhost:" + port
 }

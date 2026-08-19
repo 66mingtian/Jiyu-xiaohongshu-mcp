@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -11,112 +12,94 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMCPStatelessSinglePost 固定「/mcp 接受不带 initialize 握手的单次 POST」这一契约。
-//
-// 契约由 routes.go 里一行 Stateless 支撑，丢掉它编译和其他单测都不会报错。
-func TestMCPStatelessSinglePost(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
-	server := httptest.NewServer(router)
-	defer server.Close()
+type listedTool struct {
+	Name        string `json:"name"`
+	Annotations struct {
+		ReadOnlyHint    bool  `json:"readOnlyHint"`
+		DestructiveHint *bool `json:"destructiveHint"`
+	} `json:"annotations"`
+}
 
-	post := func(t *testing.T, body string) *http.Response {
-		t.Helper()
-		req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(body))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
+func listMCPTools(t *testing.T, router http.Handler) []listedTool {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		return resp
-	}
-
-	// 只用 tools/list：它不碰浏览器，而契约丢失时它恰好就是失败点——
-	// 有状态模式下无 session 调用 tools/list 会被回以「握手前不允许调用」。
-	resp := post(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var result struct {
+	var response struct {
 		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Result struct {
-			Tools []struct {
-				Name string `json:"name"`
-			} `json:"tools"`
+			Tools []listedTool `json:"tools"`
 		} `json:"result"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-
-	require.Nil(t, result.Error, "无握手的 tools/list 不应报错")
-	assert.NotEmpty(t, result.Result.Tools, "应返回已注册的工具")
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Nil(t, response.Error)
+	return response.Result.Tools
 }
 
-// TestNotificationToolsRegistered 固定通知相关工具已注册到 MCP。
-//
-// 三个工具的注册各是 registerTools 里一段独立代码，漏掉任何一个编译都不会报错，
-// 只有真正调用时才会发现工具不存在。
-func TestNotificationToolsRegistered(t *testing.T) {
+func TestMCPStatelessSinglePost(t *testing.T) {
 	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
-	server := httptest.NewServer(router)
-	defer server.Close()
-
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/mcp",
-		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	var result struct {
-		Result struct {
-			Tools []struct {
-				Name string `json:"name"`
-			} `json:"tools"`
-		} `json:"result"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-
-	names := make(map[string]bool, len(result.Result.Tools))
-	for _, tool := range result.Result.Tools {
-		names[tool.Name] = true
-	}
-
-	for _, want := range []string{"get_unread_count", "list_notifications", "reply_notification", "like_notification"} {
-		assert.True(t, names[want], "工具 %s 应已注册", want)
-	}
+	assert.NotEmpty(t, listMCPTools(t, router))
 }
 
-// TestNotificationRoutesRegistered 固定通知的 HTTP 路由存在。
-//
-// 读路由表而不是发请求：这些 handler 会真的起浏览器访问小红书，
-// 单测里不能碰。
-func TestNotificationRoutesRegistered(t *testing.T) {
+func TestMCPExposesExactReadOnlyWhitelist(t *testing.T) {
 	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+	tools := listMCPTools(t, router)
 
-	registered := make(map[string]bool)
-	for _, r := range router.Routes() {
-		registered[r.Method+" "+r.Path] = true
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+		assert.True(t, tool.Annotations.ReadOnlyHint, "%s 必须标记为只读", tool.Name)
+		require.NotNil(t, tool.Annotations.DestructiveHint, "%s 必须显式标记为非破坏性", tool.Name)
+		assert.False(t, *tool.Annotations.DestructiveHint, "%s 不得标记为破坏性", tool.Name)
 	}
 
-	// 列表接口两个参数都可选，GET 也要能进
-	for _, want := range []string{
-		"GET /api/v1/notifications/unread",
-		"GET /api/v1/notifications/list",
-		"POST /api/v1/notifications/list",
-		"POST /api/v1/notifications/reply",
-		"POST /api/v1/notifications/like",
+	want := []string{
+		"check_login_status",
+		"get_login_qrcode",
+		"list_feeds",
+		"search_feeds",
+		"get_feed_detail",
+		"user_profile",
+	}
+	sort.Strings(names)
+	sort.Strings(want)
+	assert.Equal(t, want, names)
+}
+
+func TestLegacyHTTPAPIIsNotExposed(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), ""))
+
+	for _, route := range router.Routes() {
+		assert.False(t, strings.HasPrefix(route.Path, "/api/"), "不应暴露旧 HTTP API: %s %s", route.Method, route.Path)
+	}
+
+	for _, path := range []string{
+		"/api/v1/publish",
+		"/api/v1/publish_video",
+		"/api/v1/feeds/comment",
+		"/api/v1/feeds/comment/reply",
+		"/api/v1/feeds/like",
+		"/api/v1/feeds/favorite",
+		"/api/v1/notifications/reply",
+		"/api/v1/notifications/like",
+		"/api/v1/login/cookies",
 	} {
-		assert.True(t, registered[want], "路由 %s 应已注册", want)
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		router.ServeHTTP(recorder, request)
+		assert.Equal(t, http.StatusNotFound, recorder.Code, "%s 必须不可达", path)
 	}
 }
 
 func TestProtectedRoutesRequireBearerToken(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token"))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token", "https://readonly.example.com"))
 
 	tests := []struct {
 		name       string
@@ -125,9 +108,9 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "health remains public", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK},
+		{name: "OAuth metadata remains public", method: http.MethodGet, path: "/.well-known/oauth-protected-resource/mcp", wantStatus: http.StatusOK},
 		{name: "MCP requires token", method: http.MethodPost, path: "/mcp", wantStatus: http.StatusUnauthorized},
 		{name: "MCP child path requires token", method: http.MethodPost, path: "/mcp/child", wantStatus: http.StatusUnauthorized},
-		{name: "HTTP API requires token", method: http.MethodGet, path: "/api/v1/notifications/unread", wantStatus: http.StatusUnauthorized},
 		{name: "CORS preflight remains public", method: http.MethodOptions, path: "/mcp", wantStatus: http.StatusNoContent},
 	}
 
@@ -135,16 +118,21 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(tt.method, tt.path, nil)
-
 			router.ServeHTTP(recorder, request)
-
 			assert.Equal(t, tt.wantStatus, recorder.Code)
 		})
 	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	router.ServeHTTP(recorder, request)
+	assert.Equal(t,
+		"Bearer resource_metadata=https://readonly.example.com/.well-known/oauth-protected-resource/mcp",
+		recorder.Header().Get("WWW-Authenticate"))
 }
 
 func TestMCPAcceptsConfiguredBearerToken(t *testing.T) {
-	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token"))
+	router := setupRoutes(NewAppServer(NewXiaohongshuService(), "secret-token", "https://readonly.example.com"))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/mcp",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
@@ -153,6 +141,5 @@ func TestMCPAcceptsConfiguredBearerToken(t *testing.T) {
 	request.Header.Set("Accept", "application/json, text/event-stream")
 
 	router.ServeHTTP(recorder, request)
-
-	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 }

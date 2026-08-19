@@ -315,9 +315,11 @@ func (s *AppServer) favoriteFeedHandler(c *gin.Context) {
 func healthHandler(c *gin.Context) {
 	respondSuccess(c, map[string]any{
 		"status":    "healthy",
-		"service":   "xiaohongshu-mcp",
+		"service":   "jiyu-xiaohongshu-readonly",
 		"version":   version,
-		"account":   "github.com/xpzouying/xiaohongshu-mcp",
+		"upstream":  "github.com/xpzouying/xiaohongshu-mcp",
+		"tools":     6,
+		"read_only": true,
 		"timestamp": "now",
 	}, "服务正常")
 }
